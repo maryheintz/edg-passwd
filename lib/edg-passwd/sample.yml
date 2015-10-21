@@ -1,0 +1,4 @@
+host: top.example.com
+port: 636
+base: ou=people,dc=top,dc=example,dc=com
+ssl: true

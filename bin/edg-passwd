@@ -1,0 +1,17 @@
+#!/Users/maryh/Software/rubies/2.2.3/bin/ruby
+
+require 'net/ldap'
+require 'io/console' # to hide input
+require 'yaml'
+require 'openssl'
+require_relative '../lib/edg-passwd/ldap.rb'
+
+username = `whoami`.chomp
+
+user = Passwd::Ldap.new(username)
+if user.bind
+	puts user.update_passwd
+else
+	puts ""
+	puts "Authentication error"
+end
