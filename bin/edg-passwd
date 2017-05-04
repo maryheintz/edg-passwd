@@ -1,17 +1,148 @@
-#!/Users/maryh/Software/rubies/2.2.3/bin/ruby
+#!/usr/bin/perl -w
 
-require 'net/ldap'
-require 'io/console' # to hide input
-require 'yaml'
-require 'openssl'
-require_relative '../lib/edg-passwd/ldap.rb'
+#	edg-password - Password program to update both unix and samba passwords
 
-username = `whoami`.chomp
+#	v1:  23 October 2007 by Mary Heintz
+#	v2:  28 December 2007 -- updated after RHEL5 installation
+#	v3:   1 July 2008 -- updated after started getting errors
+#	v4:  7 September 2009 -- updated to allow ; or \ in passwd
+#	v5:  2 December 2011 -- new server has new Manager for ldap
+#	v6:  27 August 2014 -- updated to allow !@#$%^&() in passwd
 
-user = Passwd::Ldap.new(username)
-if user.bind
-	puts user.update_passwd
-else
-	puts ""
-	puts "Authentication error"
-end
+use strict;
+use Crypt::SmbHash qw (nthash);
+use Term::ReadKey;
+use Net::LDAP;
+use Net::LDAP::Entry;
+use Net::LDAP::LDIF;
+use File::Temp;
+
+sub setup_dn {
+	my ($dn,$binddn,$ldappass,$username,$newuser);
+	
+	# The root user will specify the username on the command line, all
+	# other users may only change their own password
+	$username = `whoami`;
+	chomp $username;
+
+	ReadMode 2; # Don't see passwords as typed
+	# If the user is not root, ask for current password.
+
+	if ($username ne "root" )
+	{
+		if ($#ARGV == -1)
+		{	
+			print "Changing password for $username\n";
+
+			print "Enter your (current) password: ";
+			$ldappass = ReadLine( 0 );
+			chomp $ldappass;
+			ReadMode 0;
+
+			# Set up the dn
+			# In this case, the binddn and dn to change are the same
+			$dn = "uid=$username,ou=people,dc=edg,dc=uchicago,dc=edu";
+			$binddn = $dn;
+			print "\n";
+		}
+		else
+		{
+			print "Only root can specify a username\n";
+			ReadMode 0;
+			exit(1);
+		}
+	}
+	else
+	{
+		if ($#ARGV == 0)
+		{
+			# Get newuser
+			$newuser = $ARGV[0];
+
+			# Prompt for ldap password for root
+			print "Enter the LDAP password: ";
+			$ldappass = ReadLine( 0 );
+			chomp $ldappass;
+			ReadMode 0;
+
+			# Set up the dn to use for binding
+			$binddn = "cn=root,dc=edg,dc=uchicago,dc=edu";
+		
+			# Set up the dn of user going to change
+			$dn = "uid=$newuser,ou=people,dc=edg,dc=uchicago,dc=edu";
+			print "\n\n$dn\n\n";
+		}
+		else
+		{
+			print "Use the passwd.orig command to change root's password\n";
+			ReadMode 0;
+			exit(1);	
+		}
+	}
+	return ($binddn,$dn,$ldappass);
+}
+
+my($binddn,$dn,$ldappass) = &setup_dn;
+
+# Open a connection to the ldapserver and make sure this is the correct password
+my $ldap = Net::LDAP->new ( "edg.uchicago.edu" ) or die "$@";
+
+# Start tls for a secure connection
+# Note will get "Confidentiality Required" error if don't have ciphers => HIGH line
+my $mesg = $ldap -> start_tls(
+			verify => 'require',
+			capath => "/etc/openldap/cacerts",
+			ciphers => 'HIGH');
+$mesg -> code && $ldap->disconnect() && die $mesg -> error_text;
+
+# Bind with the server as the Manager
+$mesg = $ldap->bind($binddn, password=>"$ldappass");
+$mesg->code && $ldap->unbind() && $ldap->disconnect() && die $mesg->error_text;
+
+ReadMode 2;
+# Get the new passwords
+print "New password: ";
+my $password1 = ReadLine( 0 );
+chomp $password1;
+print "\nRetype new password: ";
+my $password2 = ReadLine( 0 );
+chomp $password2;
+
+ReadMode 0;
+
+if ($password1 ne $password2)
+{
+	print "\nSorry, passwords do not match.\n";
+	undef $password1;
+	undef $password2;
+	exit 1;
+}
+
+# Scan $password1 for semicolons.  If find one, put a \ in front of it
+$password1 =~ s/\;/\\;/g;
+$password1 =~ s/\\/\\\\/g;
+$password1 =~ s/\!/\\!/g;
+$password1 =~ s/\@;/\\@;/g;
+$password1 =~ s/\#;/\\#;/g;
+$password1 =~ s/\$;/\\$;/g;
+$password1 =~ s/\%;/\\%;/g;
+$password1 =~ s/\^;/\\^;/g;
+$password1 =~ s/\&/\\&/g;
+$password1 =~ s/\(/\\(/g;
+$password1 =~ s/\)/\\)/g;
+
+# Generate a sambaNTPassword for the user
+my $ntpassword = nthash( $password1 );
+
+# Generate a userPassword for the user
+my $userpassword = `/usr/sbin/slappasswd -s $password1`;
+
+$mesg = $ldap->modify ( $dn, changes => [
+				replace => [ sambaNTPassword => "$ntpassword" ],
+				replace => [ userPassword => "$userpassword" ] ] );
+
+$mesg->code && $ldap->unbind() && $ldap->disconnect() && die "Failed to update: ", $mesg->error;
+
+print "\n";
+
+$ldap->unbind();
